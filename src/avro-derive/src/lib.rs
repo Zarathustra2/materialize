@@ -107,11 +107,23 @@ pub fn derive_decodeable(item: TokenStream) -> TokenStream {
                 }) {
                     let toks = &decoder_factory.tokens;
                     quote! {
-                        #toks()
+                        self.#id = Some(#toks(field));
                     }
                 } else {
-                    quote! {
-                        <#ty as ::mz_avro::StatefulAvroDecodable>::new_decoder(#state_expr)
+                    if quote!(#ty).to_string() == "String" {
+                        quote! {
+                            let decoder = ValueDecoder {};
+                            let res = field.decode_field(decoder)?;
+                            match res {
+                                mz_avro::types::Value::String(v) => self.#id = Some(v),
+                                _ => panic!("Failed to decode field, expected value to be String, id {} res: {:?}", #id_str, res),
+                            }
+                        }
+                    } else {
+                        quote! {
+                            let decoder = <#ty as ::mz_avro::StatefulAvroDecodable>::new_decoder(#state_expr);
+                            self.#id = Some(field.decode_field(decoder)?);
+                        }
                     }
                 };
             quote! {
@@ -119,8 +131,7 @@ pub fn derive_decodeable(item: TokenStream) -> TokenStream {
                     if self.#id.is_some() {
                         return Err(::mz_avro::error::Error::Decode(::mz_avro::error::DecodeError::Custom(#found_twice.to_string())));
                     }
-                    let decoder = #make_decoder;
-                    self.#id = Some(field.decode_field(decoder)?);
+                    #make_decoder
                 }
             }
         })
@@ -149,7 +160,7 @@ pub fn derive_decodeable(item: TokenStream) -> TokenStream {
     let out = quote! {
         #[derive(Debug)]
         #[allow(non_camel_case_types)]
-        struct #decoder_name {
+        pub struct #decoder_name {
             _STATE: #state_type,
             #(#fields),*
         }

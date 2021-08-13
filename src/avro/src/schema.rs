@@ -32,6 +32,7 @@ use std::fmt;
 use std::rc::Rc;
 use std::str::FromStr;
 
+use anyhow::{anyhow, Error, Result};
 use digest::Digest;
 use itertools::Itertools;
 use log::{debug, warn};
@@ -380,6 +381,16 @@ impl Schema {
     }
     pub fn lookup(&self, idx: usize) -> &NamedSchemaPiece {
         &self.named[idx]
+    }
+    pub fn try_lookup(&self, idx: usize) -> Result<&NamedSchemaPiece, Error> {
+        if idx >= self.named.len() {
+            return Err(anyhow!(
+                "IndexOutOfBonds {} is greater than the count of known schemas {}",
+                idx,
+                self.named.len()
+            ));
+        }
+        Ok(&self.named[idx])
     }
     pub fn try_lookup_name(&self, name: &FullName) -> Option<&NamedSchemaPiece> {
         self.indices.get(name).map(|&idx| &self.named[idx])
