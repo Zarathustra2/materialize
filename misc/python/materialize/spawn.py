@@ -17,9 +17,7 @@ operations provided by the standard [`subprocess`][subprocess] module.
 
 import subprocess
 from pathlib import Path
-from typing import IO, Dict, Optional, Sequence, Union, overload
-
-from typing_extensions import Literal
+from typing import IO, Dict, Literal, Optional, Sequence, Union, overload
 
 from materialize import ui
 
@@ -89,6 +87,7 @@ def capture(
     stdin: Union[None, int, IO[bytes]] = None,
     unicode: Literal[False] = ...,
     stderr_too: bool = False,
+    env: Optional[Dict[str, str]] = None,
 ) -> bytes:
     ...
 
@@ -101,6 +100,7 @@ def capture(
     *,
     unicode: Literal[True],
     stderr_too: bool = False,
+    env: Optional[Dict[str, str]] = None,
 ) -> str:
     ...
 
@@ -111,6 +111,7 @@ def capture(
     stdin: Union[None, int, IO[bytes]] = None,
     unicode: bool = False,
     stderr_too: bool = False,
+    env: Optional[Dict[str, str]] = None,
 ) -> Union[str, bytes]:
     """Capture the output of a subprocess.
 
@@ -138,5 +139,5 @@ def capture(
     """
     stderr = subprocess.STDOUT if stderr_too else None
     return subprocess.check_output(  # type: ignore
-        args, cwd=cwd, stdin=stdin, universal_newlines=unicode, stderr=stderr
+        args, cwd=cwd, stdin=stdin, universal_newlines=unicode, stderr=stderr, env=env
     )

@@ -65,14 +65,16 @@
 // - Impl of Runtime directly using Indexed
 // - Impl of Runtime with Timely workers running in threads
 // - Impl of Runtime with Timely workers running in processes
-// - Storage (buffer/blob) with variable latency/slow requests
+// - Storage (log/blob) with variable latency/slow requests
 // - Vary key size
 // - Deleting streams
 
 use std::env;
 
+use ore::test::init_logging;
 use rand::rngs::OsRng;
 use rand::RngCore;
+use timely::progress::Antichain;
 
 use crate::error::Error;
 use crate::indexed::ListenEvent;
@@ -170,7 +172,7 @@ pub struct ReadOutputReq {
 
 #[derive(Clone, Debug)]
 pub struct ReadOutputRes {
-    contents: Vec<ListenEvent<Result<String, String>, Result<(), String>>>,
+    contents: Vec<ListenEvent<String, ()>>,
 }
 
 #[derive(Clone, Debug)]
@@ -199,6 +201,7 @@ pub struct ReadSnapshotReq {
 #[derive(Clone, Debug)]
 pub struct ReadSnapshotRes {
     seqno: u64,
+    since: Antichain<u64>,
     contents: Vec<((String, ()), u64, isize)>,
 }
 
@@ -232,15 +235,17 @@ impl<R: Runtime> Runner<R> {
 }
 
 pub fn run<R: Runtime>(steps: usize, config: GeneratorConfig, runtime: R) {
+    init_logging();
     let seed =
         env::var("MZ_NEMESIS_SEED").map_or_else(|_| OsRng.next_u64(), |s| s.parse().unwrap());
-    eprintln!("MZ_NEMESIS_SEED={}", seed);
+    let steps = env::var("MZ_NEMESIS_STEPS").map_or(steps, |s| s.parse().unwrap());
+    log::info!("MZ_NEMESIS_SEED={} MZ_NEMESIS_STEPS={}", seed, steps);
     let generator = Generator::new(seed, config);
     let runner = Runner::new(generator, runtime);
     let history = runner.run(steps);
     if let Err(errors) = Validator::validate(history) {
         for err in errors.iter() {
-            eprintln!("invariant violation: {}", err)
+            log::warn!("invariant violation: {}", err)
         }
         assert!(errors.is_empty());
     }

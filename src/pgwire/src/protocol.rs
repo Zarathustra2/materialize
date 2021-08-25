@@ -445,7 +445,7 @@ where
                 TransactionStatus::Started(_) | TransactionStatus::InTransactionImplicit(_)
             );
             if implicit {
-                self.commit_transaction().await;
+                self.commit_transaction().await?;
             }
         }
 
@@ -516,21 +516,27 @@ where
     }
 
     /// Commits and clears the current transaction.
-    async fn commit_transaction(&mut self) {
-        // We ignore the ExecuteResponse or error here because there's nothing to tell
-        // the user in either of those cases.
-        let _ = self
-            .coord_client
-            .end_transaction(EndTransactionAction::Commit)
-            .await;
+    async fn commit_transaction(&mut self) -> Result<(), io::Error> {
+        self.end_transaction(EndTransactionAction::Commit).await
     }
 
     /// Rollback and clears the current transaction.
-    async fn rollback_transaction(&mut self) {
-        let _ = self
-            .coord_client
-            .end_transaction(EndTransactionAction::Rollback)
-            .await;
+    async fn rollback_transaction(&mut self) -> Result<(), io::Error> {
+        self.end_transaction(EndTransactionAction::Rollback).await
+    }
+
+    /// End a transaction and report to the user if an error occurred.
+    async fn end_transaction(&mut self, action: EndTransactionAction) -> Result<(), io::Error> {
+        let resp = self.coord_client.end_transaction(action).await;
+        if let Err(err) = resp {
+            self.conn
+                .send(BackendMessage::ErrorResponse(ErrorResponse::from_coord(
+                    Severity::Error,
+                    err,
+                )))
+                .await?;
+        }
+        Ok(())
     }
 
     async fn bind(
@@ -617,6 +623,30 @@ where
                     .await
             }
         };
+
+        if let Some(desc) = stmt.desc().relation_desc.clone() {
+            for (format, ty) in result_formats.iter().zip(desc.iter_types()) {
+                match (format, &ty.scalar_type) {
+                    (pgrepr::Format::Binary, repr::ScalarType::List { .. }) => {
+                        return self
+                            .error(ErrorResponse::error(
+                                SqlState::PROTOCOL_VIOLATION,
+                                "binary encoding of list types is not implemented",
+                            ))
+                            .await;
+                    }
+                    (pgrepr::Format::Binary, repr::ScalarType::Map { .. }) => {
+                        return self
+                            .error(ErrorResponse::error(
+                                SqlState::PROTOCOL_VIOLATION,
+                                "binary encoding of map types is not implemented",
+                            ))
+                            .await;
+                    }
+                    _ => (),
+                }
+            }
+        }
 
         let desc = stmt.desc().clone();
         let stmt = stmt.sql().cloned();
@@ -876,7 +906,7 @@ where
             TransactionStatus::Started(_)
         );
         if started {
-            self.commit_transaction().await;
+            self.commit_transaction().await?;
         }
         return self.ready().await;
     }
@@ -1542,11 +1572,11 @@ where
             TransactionStatus::Default | TransactionStatus::Failed(_) => {}
             // In Started (i.e., a single statement), cleanup ourselves.
             TransactionStatus::Started(_) => {
-                self.rollback_transaction().await;
+                self.rollback_transaction().await?;
             }
             // Implicit transactions also clear themselves.
             TransactionStatus::InTransactionImplicit(_) => {
-                self.rollback_transaction().await;
+                self.rollback_transaction().await?;
             }
             // Explicit transactions move to failed.
             TransactionStatus::InTransaction(_) => {

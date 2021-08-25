@@ -10,15 +10,11 @@
 # mzcompose.py — runs Docker Compose with Materialize customizations.
 
 import argparse
-import json
 import os
-import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from typing import IO, List, Optional, Sequence, Text, Tuple
-
-from typing_extensions import NoReturn
+from typing import IO, List, NoReturn, Optional, Sequence, Text, Tuple
 
 from materialize import errors, mzbuild, mzcompose, spawn, ui
 
@@ -69,7 +65,10 @@ def main(argv: List[str]) -> int:
             for name in repo.compositions:
                 print(f"    {name}", file=sys.stderr)
         else:
-            print("error: directory does not contain mzcompose.yml", file=sys.stderr)
+            print(
+                "error: directory does not contain a mzcompose.yml or mzworkflows.py file",
+                file=sys.stderr,
+            )
             print(
                 "hint: enter one of the following directories and run ./mzcompose:",
                 file=sys.stderr,

@@ -18,10 +18,10 @@ version: '3.7'
 
 services:
   shell:
-    image: ubuntu:bionic-20200403
+    mzbuild: ubuntu-base
 
   check_var1_good1:
-    image: ubuntu:bionic-20200403
+    mzbuild: ubuntu-base
     command: test ${VAR1} = good1
 
 mzworkflows:

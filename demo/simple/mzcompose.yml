@@ -76,5 +76,5 @@ services:
     depends_on:
       - materialized
   inspect:
-    image: ubuntu:bionic-20200403
+    mzbuild: ubuntu-base
     command: "true"

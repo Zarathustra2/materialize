@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use timely::progress::Timestamp;
+use timely::progress::{Antichain, Timestamp};
 
 use crate::error::Error;
 use crate::indexed::ListenEvent;
@@ -24,6 +24,7 @@ pub struct Validator {
     seal_frontier: HashMap<String, u64>,
     since_frontier: HashMap<String, u64>,
     writes_by_seqno: BTreeMap<(String, SeqNo), Vec<((String, ()), u64, isize)>>,
+    output_by_stream: HashMap<String, Vec<ListenEvent<String, ()>>>,
     available_snapshots: HashMap<SnapshotId, String>,
     errors: Vec<String>,
     storage_available: bool,
@@ -49,6 +50,7 @@ impl Validator {
             seal_frontier: HashMap::new(),
             since_frontier: HashMap::new(),
             writes_by_seqno: BTreeMap::new(),
+            output_by_stream: HashMap::new(),
             available_snapshots: HashMap::new(),
             errors: Vec::new(),
             storage_available: true,
@@ -65,8 +67,7 @@ impl Validator {
     }
 
     fn step(&mut self, s: Step) {
-        // TODO: Figure out how to get the log crate working.
-        eprintln!("step: {:?}", &s);
+        log::debug!("step: {:?}", &s);
         match s.res {
             Res::Write(WriteReq::Single(req), res) => self.step_write_single(s.req_id, req, res),
             Res::Write(WriteReq::Multi(req), res) => self.step_write_multi(s.req_id, req, res),
@@ -166,36 +167,25 @@ impl Validator {
         self.check_success(req_id, &res, should_succeed);
 
         if let Ok(res) = res {
+            let all_stream_output = self.output_by_stream.entry(req.stream.clone()).or_default();
+            all_stream_output.extend(res.contents);
+
             // Seal acts as a barrier, so we're guaranteed to receive any writes
             // that were sent for times before the seal. However, we're not
             // guaranteed to see every seal we sent, especially across restarts.
             // Start by finding the latest seal.
             let mut latest_seal = Timestamp::minimum();
             let mut all_received_writes = Vec::new();
-            for e in res.contents {
+            for e in all_stream_output.iter() {
                 match e {
                     ListenEvent::Sealed(ts) => {
-                        if ts > latest_seal {
-                            latest_seal = ts;
+                        if *ts > latest_seal {
+                            latest_seal = *ts;
                         }
                     }
                     ListenEvent::Records(records) => {
-                        for ((k, v), ts, diff) in records.into_iter() {
-                            let k = match k {
-                                Ok(k) => k,
-                                Err(err) => {
-                                    self.errors.push(format!("unable to decode key {}", err,));
-                                    continue;
-                                }
-                            };
-                            let v = match v {
-                                Ok(v) => v,
-                                Err(err) => {
-                                    self.errors.push(format!("unable to decode val {}", err,));
-                                    continue;
-                                }
-                            };
-                            all_received_writes.push(((k, v), ts, diff));
+                        for ((k, v), ts, diff) in records.iter() {
+                            all_received_writes.push(((k.clone(), *v), *ts, *diff));
                         }
                     }
                 }
@@ -231,7 +221,7 @@ impl Validator {
                 .filter(|(_, ts, _)| *ts < latest_seal)
                 .cloned()
                 .collect();
-            if !updates_eq(&mut actual, &mut expected) {
+            if !updates_eq(&mut actual, &mut expected, Antichain::new()) {
                 self.errors.push(format!(
                     "incorrect output {:?} up to {}, expected {:?} got: {:?}",
                     req_id, latest_seal, expected, actual
@@ -244,7 +234,7 @@ impl Validator {
         let should_succeed = self.runtime_available
             && self.storage_available
             && req.ts
-                > self
+                >= self
                     .seal_frontier
                     .get(&req.stream)
                     .copied()
@@ -264,7 +254,7 @@ impl Validator {
         let should_succeed = self.runtime_available
             && self.storage_available
             && req.ts
-                > self
+                >= self
                     .since_frontier
                     .get(&req.stream)
                     .copied()
@@ -309,7 +299,7 @@ impl Validator {
                         .flat_map(|(_, v)| v)
                         .cloned()
                         .collect();
-                    if !updates_eq(&mut actual, &mut expected) {
+                    if !updates_eq(&mut actual, &mut expected, res.since) {
                         self.errors.push(format!(
                             "incorrect snapshot {:?} expected {:?} got: {:?}",
                             req_id, expected, actual
@@ -340,12 +330,14 @@ impl Validator {
         let should_succeed = !self.runtime_available || self.storage_available;
         self.check_success(req_id, &res, should_succeed);
         self.runtime_available = false;
+        self.output_by_stream.clear();
     }
 }
 
 fn updates_eq(
     actual: &mut Vec<((String, ()), u64, isize)>,
     expected: &mut Vec<((String, ()), u64, isize)>,
+    since: Antichain<u64>,
 ) -> bool {
     // TODO: This is also used by the implementation. Write a slower but more
     // obvious impl of consolidation here and use it for validation.
@@ -353,6 +345,22 @@ fn updates_eq(
     // TODO: The actual snapshot will eventually be compacted up to some since
     // frontier and the expected snapshot will need to account for that when
     // checking equality.
+
+    for (_, t, _) in actual.iter_mut() {
+        for ts in since.elements().iter() {
+            if *t < *ts {
+                *t = *ts;
+            }
+        }
+    }
+
+    for (_, t, _) in expected.iter_mut() {
+        for ts in since.elements().iter() {
+            if *t < *ts {
+                *t = *ts;
+            }
+        }
+    }
     differential_dataflow::consolidation::consolidate_updates(actual);
     differential_dataflow::consolidation::consolidate_updates(expected);
     actual == expected

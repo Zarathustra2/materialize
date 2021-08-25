@@ -20,12 +20,15 @@ use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use log;
+use ore::metrics::MetricsRegistry;
+use timely::progress::Antichain;
 
 use crate::error::Error;
+use crate::future::{Future, FutureHandle};
 use crate::indexed::encoding::Id;
+use crate::indexed::metrics::{metric_duration_ms, Metrics};
 use crate::indexed::{Indexed, IndexedSnapshot, ListenEvent, ListenFn, Snapshot};
-use crate::pfuture::{Future, FutureHandle};
-use crate::storage::{Blob, Buffer, SeqNo};
+use crate::storage::{Blob, Log, SeqNo};
 use crate::Codec;
 
 enum Cmd {
@@ -36,7 +39,7 @@ enum Cmd {
         FutureHandle<SeqNo>,
     ),
     Seal(Vec<Id>, u64, FutureHandle<()>),
-    AllowCompaction(Id, u64, FutureHandle<()>),
+    AllowCompaction(Vec<(Id, Antichain<u64>)>, FutureHandle<()>),
     Snapshot(Id, FutureHandle<IndexedSnapshot>),
     Listen(Id, ListenFn<Vec<u8>, Vec<u8>>, FutureHandle<()>),
     Stop(FutureHandle<()>),
@@ -50,17 +53,23 @@ enum Cmd {
 // TODO: At the moment, this runs IO and heavy cpu work in a single thread.
 // Move this work out into whatever async runtime the user likes, via something
 // like https://docs.rs/rdkafka/0.26.0/rdkafka/util/trait.AsyncRuntime.html
-pub fn start<U, L>(buf: U, blob: L) -> Result<RuntimeClient, Error>
+pub fn start<L, B>(log: L, blob: B, reg: &MetricsRegistry) -> Result<RuntimeClient, Error>
 where
-    U: Buffer + Send + 'static,
-    L: Blob + Send + 'static,
+    L: Log + Send + 'static,
+    B: Blob + Send + 'static,
 {
-    let indexed = Indexed::new(buf, blob)?;
+    let metrics = Metrics::register_with(reg);
+    let indexed = Indexed::new(log, blob, metrics.clone())?;
     // TODO: Is an unbounded channel the right thing to do here?
     let (tx, rx) = crossbeam_channel::unbounded();
+    let runtime_impl_metrics = metrics.clone();
     let runtime_f = move || {
         // TODO: Set up the tokio or other async runtime context here.
-        let mut l = RuntimeImpl { indexed, rx };
+        let mut l = RuntimeImpl {
+            indexed,
+            rx,
+            metrics: runtime_impl_metrics,
+        };
         while l.work() {}
     };
     let id = RuntimeId::new();
@@ -68,7 +77,11 @@ where
         .name(format!("persist-runtime-{}", id.0))
         .spawn(runtime_f)?;
     let handle = Mutex::new(Some(handle));
-    let core = RuntimeCore { handle, tx };
+    let core = RuntimeCore {
+        handle,
+        tx,
+        metrics,
+    };
     Ok(RuntimeClient {
         id,
         core: Arc::new(core),
@@ -90,10 +103,12 @@ impl RuntimeId {
 struct RuntimeCore {
     handle: Mutex<Option<JoinHandle<()>>>,
     tx: crossbeam_channel::Sender<Cmd>,
+    metrics: Metrics,
 }
 
 impl RuntimeCore {
     fn send(&self, cmd: Cmd) {
+        self.metrics.cmd_queue_in.inc();
         if let Err(crossbeam_channel::SendError(cmd)) = self.tx.send(cmd) {
             // According to the docs, a SendError can only happen if the
             // receiver has hung up, which in this case only happens if the
@@ -108,7 +123,7 @@ impl RuntimeCore {
                 Cmd::Destroy(_, res) => res.fill(Err(Error::RuntimeShutdown)),
                 Cmd::Write(_, res) => res.fill(Err(Error::RuntimeShutdown)),
                 Cmd::Seal(_, _, res) => res.fill(Err(Error::RuntimeShutdown)),
-                Cmd::AllowCompaction(_, _, res) => res.fill(Err(Error::RuntimeShutdown)),
+                Cmd::AllowCompaction(_, res) => res.fill(Err(Error::RuntimeShutdown)),
                 Cmd::Snapshot(_, res) => res.fill(Err(Error::RuntimeShutdown)),
                 Cmd::Listen(_, _, res) => res.fill(Err(Error::RuntimeShutdown)),
             }
@@ -222,14 +237,15 @@ impl RuntimeClient {
         self.core.send(Cmd::Seal(ids.to_vec(), ts, res))
     }
 
-    /// Asynchronously advances the compaction frontier for the stream with the given id,
-    /// which lets the stream discard historical detail for times not beyond the
-    /// compaction frontier. This also restricts what times the compaction frontier
-    /// can later be advanced to for this id.
+    /// Asynchronously advances the compaction frontier for the streams with the
+    /// given ids, which lets the stream discard historical detail for times not
+    /// beyond the compaction frontier. This also restricts what times the
+    /// compaction frontier can later be advanced to for these ids.
     ///
-    /// The id must have previously been registered.
-    fn allow_compaction(&self, id: Id, ts: u64, res: FutureHandle<()>) {
-        self.core.send(Cmd::AllowCompaction(id, ts, res))
+    /// The ids must have previously been registered.
+    fn allow_compaction(&self, id_sinces: &[(Id, Antichain<u64>)], res: FutureHandle<()>) {
+        self.core
+            .send(Cmd::AllowCompaction(id_sinces.to_vec(), res))
     }
 
     /// Asynchronously returns a [crate::indexed::Snapshot] for the stream
@@ -337,6 +353,13 @@ impl<K: Codec, V: Codec> StreamWriteHandle<K, V> {
         self.runtime.seal(&[self.id], upper, tx);
         rx
     }
+
+    /// Unblocks compaction for updates at or before `since`.
+    pub fn allow_compaction(&self, since: Antichain<u64>) -> Future<()> {
+        let (tx, rx) = Future::new();
+        self.runtime.allow_compaction(&[(self.id, since)], tx);
+        rx
+    }
 }
 
 /// A handle for writing to multiple streams.
@@ -439,6 +462,26 @@ impl<K: Codec, V: Codec> MultiWriteHandle<K, V> {
         self.runtime.seal(ids, upper, tx);
         rx
     }
+
+    /// Unblocks compaction for updates for the given streams at the paired
+    /// `since` timestamp.
+    ///
+    /// Ids may not be duplicated (this is equivalent to allowing compaction on
+    /// the stream twice at the same timestamp, which we currently disallow).
+    pub fn allow_compaction(&self, id_sinces: &[(Id, Antichain<u64>)]) -> Future<()> {
+        let (tx, rx) = Future::new();
+        for (id, _) in id_sinces {
+            if !self.ids.contains(id) {
+                tx.fill(Err(Error::from(format!(
+                    "MultiWriteHandle cannot allow_compaction stream: {:?}",
+                    id
+                ))));
+                return rx;
+            }
+        }
+        self.runtime.allow_compaction(id_sinces, tx);
+        rx
+    }
 }
 
 /// A consistent snapshot of all data currently stored for an id, with keys and
@@ -465,10 +508,17 @@ impl<K: Codec, V: Codec> DecodedSnapshot<K, V> {
     pub fn seqno(&self) -> SeqNo {
         self.snap.seqno()
     }
+
+    /// Returns the since frontier of this snapshot.
+    ///
+    /// All updates at times less than this frontier must be forwarded
+    /// to some time in this frontier.
+    pub fn since(&self) -> Antichain<u64> {
+        self.snap.since()
+    }
 }
 
-/// Extension methods on `DecodedSnapshot<K, V>` for use in tests.
-#[cfg(test)]
+/// Extension methods on `DecodedSnapshot<K, V>` for use in tests and benchmarks.
 impl<K: Codec + Ord, V: Codec + Ord> DecodedSnapshot<K, V> {
     /// A full read of the data in the snapshot.
     pub fn read_to_end_flattened(&mut self) -> Result<Vec<((K, V), u64, isize)>, Error> {
@@ -498,6 +548,14 @@ impl<K: Codec, V: Codec> Snapshot<Result<K, String>, Result<V, String>> for Deco
             ((k, v), ts, diff)
         }));
         ret
+    }
+}
+
+impl<K, V> DecodedSnapshot<K, V> {
+    /// A logical upper bound on the times that had been added to the collection
+    /// when this snapshot was taken
+    pub fn get_seal(&self) -> Antichain<u64> {
+        self.snap.get_seal()
     }
 }
 
@@ -562,21 +620,15 @@ impl<K: Codec, V: Codec> StreamReadHandle<K, V> {
         self.runtime.listen(self.id, listen_fn, tx);
         rx.recv()
     }
-
-    /// Unblocks compaction for updates at or before `since`.
-    pub fn allow_compaction(&mut self, since: u64) -> Future<()> {
-        let (tx, rx) = Future::new();
-        self.runtime.allow_compaction(self.id, since, tx);
-        rx
-    }
 }
 
-struct RuntimeImpl<U: Buffer, L: Blob> {
-    indexed: Indexed<U, L>,
+struct RuntimeImpl<L: Log, B: Blob> {
+    indexed: Indexed<L, B>,
     rx: crossbeam_channel::Receiver<Cmd>,
+    metrics: Metrics,
 }
 
-impl<U: Buffer, L: Blob> RuntimeImpl<U, L> {
+impl<L: Log, B: Blob> RuntimeImpl<L, B> {
     /// Synchronously waits for the next command, executes it, and responds.
     ///
     /// Returns false to indicate a graceful shutdown, true otherwise.
@@ -610,58 +662,68 @@ impl<U: Buffer, L: Blob> RuntimeImpl<U, L> {
             }
         }
 
+        let run_start = Instant::now();
         for cmd in cmds {
             match cmd {
                 Cmd::Stop(res) => {
                     // Finish up any pending work that we can before closing.
-                    let _ = self.indexed.step();
+                    if let Err(e) = self.indexed.step() {
+                        self.metrics.cmd_step_error_count.inc();
+                        log::warn!("error running step: {:?}", e);
+                    }
                     res.fill(self.indexed.close());
                     return false;
                 }
                 Cmd::Register(id, (key_codec_name, val_codec_name), res) => {
-                    let r = self.indexed.register(&id, key_codec_name, val_codec_name);
-                    res.fill(r);
+                    self.indexed
+                        .register(&id, key_codec_name, val_codec_name, res);
                 }
                 Cmd::Destroy(id, res) => {
-                    let r = self.indexed.destroy(&id);
-                    res.fill(r);
+                    self.indexed.destroy(&id, res);
                 }
                 Cmd::Write(updates, res) => {
-                    let r = self.indexed.write_sync(updates);
-                    res.fill(r);
+                    self.metrics.cmd_write_count.inc();
+                    self.indexed.write(updates, res);
                 }
                 Cmd::Seal(ids, ts, res) => {
-                    let r = self.indexed.seal(ids, ts);
-                    res.fill(r);
+                    self.indexed.seal(ids, ts, res);
                 }
-                Cmd::AllowCompaction(id, ts, res) => {
-                    let r = self.indexed.allow_compaction(id, ts);
-                    res.fill(r);
+                Cmd::AllowCompaction(id_sinces, res) => {
+                    self.indexed.allow_compaction(id_sinces, res);
                 }
                 Cmd::Snapshot(id, res) => {
-                    let r = self.indexed.snapshot(id);
-                    res.fill(r);
+                    self.indexed.snapshot(id, res);
                 }
                 Cmd::Listen(id, listen_fn, res) => {
-                    let r = self.indexed.listen(id, listen_fn);
-                    res.fill(r);
+                    self.indexed.listen(id, listen_fn, res);
                 }
             }
+            self.metrics.cmd_run_count.inc()
         }
+        let step_start = Instant::now();
+        self.metrics
+            .cmd_run_ms
+            .inc_by(metric_duration_ms(step_start.duration_since(run_start)));
 
         if let Err(e) = self.indexed.step() {
+            self.metrics.cmd_step_error_count.inc();
             // TODO: revisit whether we need to move this to a different log level
             // depending on how spammy it ends up being. Alternatively, we
             // may want to rate-limit our logging here.
             log::warn!("error running step: {:?}", e);
         }
+
+        self.metrics
+            .cmd_step_ms
+            .inc_by(metric_duration_ms(step_start.elapsed()));
+
         return more_work;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::mem::{MemBlob, MemBuffer, MemRegistry};
+    use crate::mem::{MemBlob, MemLog, MemRegistry};
 
     use super::*;
 
@@ -672,9 +734,9 @@ mod tests {
             (("key2".to_string(), "val2".to_string()), 1, 1),
         ];
 
-        let buffer = MemBuffer::new_no_reentrance("runtime");
+        let log = MemLog::new_no_reentrance("runtime");
         let blob = MemBlob::new_no_reentrance("runtime");
-        let mut runtime = start(buffer, blob)?;
+        let mut runtime = start(log, blob, &MetricsRegistry::new())?;
 
         let (write, meta) = runtime.create_or_load("0")?;
         write.write(&data).recv()?;
@@ -696,9 +758,9 @@ mod tests {
             (("key2".to_string(), "val2".to_string()), 1, 1),
         ];
 
-        let buffer = MemBuffer::new_no_reentrance("concurrent");
+        let log = MemLog::new_no_reentrance("concurrent");
         let blob = MemBlob::new_no_reentrance("concurrent");
-        let client1 = start(buffer, blob)?;
+        let client1 = start(log, blob, &MetricsRegistry::new())?;
         let _ = client1.create_or_load::<String, String>("0")?;
 
         // Everything is still running after client1 is dropped.
@@ -721,7 +783,7 @@ mod tests {
 
         let mut registry = MemRegistry::new();
 
-        // Shutdown happens if we explicitly call stop, unlocking the buffer and
+        // Shutdown happens if we explicitly call stop, unlocking the log and
         // blob and allowing them to be reused in the next Indexed.
         let mut persister = registry.open("path", "restart-1")?;
         let (write, _) = persister.create_or_load("0")?;
@@ -787,10 +849,10 @@ mod tests {
         let ids = &[c1s1.stream_id(), c1s2.stream_id()];
         multi.seal(ids, 2).recv()?;
         // We don't expose reading the seal directly, so hack it a bit here by
-        // verifying that we can't re-seal at the same timestamp (which is
+        // verifying that we can't re-seal at a prior timestamp (which is
         // disallowed).
-        assert_eq!(c1s1.seal(2).recv(), Err(Error::from("invalid seal for Id(0): 2 not in advance of current seal frontier Antichain { elements: [2] }")));
-        assert_eq!(c1s2.seal(2).recv(), Err(Error::from("invalid seal for Id(1): 2 not in advance of current seal frontier Antichain { elements: [2] }")));
+        assert_eq!(c1s1.seal(1).recv(), Err(Error::from("invalid seal for Id(0): 1 not at or in advance of current seal frontier Antichain { elements: [2] }")));
+        assert_eq!(c1s2.seal(1).recv(), Err(Error::from("invalid seal for Id(1): 1 not at or in advance of current seal frontier Antichain { elements: [2] }")));
 
         // Cannot write to streams not specified during construction.
         let (c1s3, _) = client1.create_or_load::<(), ()>("3")?;

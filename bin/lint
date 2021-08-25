@@ -56,6 +56,7 @@ copyright_files=$(grep -vE \
     -e '^ci/builder/(ssh_known_hosts|stable.stamp|nightly.stamp|crosstool.defconfig)$' \
     -e '^ci/www/public/_redirects$' \
     -e 'demo/chbench/chbench' \
+    -e 'src/pid-file/libbsd' \
     -e 'test/sqllogictest/postgres/testdata/.*\.data' \
     -e 'test/pgtest/.*\.pt' \
     -e 'test/coordtest/.*\.ct' \
@@ -80,7 +81,7 @@ fi
 
 if [[ ! "${MZDEV_NO_PYTHON:-}" ]]; then
     try bin/pycheck
-    try bin/pyfmt --diff --check --quiet
+    try bin/pyfmt --check --diff
     if try_last_failed; then
         echo "lint: $(red error:) python formatting discrepancies found"
         echo "hint: run bin/pyfmt" >&2

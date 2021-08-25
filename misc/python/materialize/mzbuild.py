@@ -16,7 +16,6 @@ documentation][user-docs].
 """
 
 import base64
-import contextlib
 import enum
 import hashlib
 import json
@@ -31,23 +30,9 @@ from collections import OrderedDict
 from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryFile
-from typing import (
-    IO,
-    Any,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Sequence,
-    Set,
-    Union,
-    cast,
-    overload,
-)
+from typing import IO, Any, Dict, Iterable, Iterator, List, Sequence, Set
 
 import yaml
-from typing_extensions import Literal
 
 from materialize import cargo, git, spawn, ui
 
@@ -114,6 +99,14 @@ def xbinutil(tool: str) -> str:
 
 xobjcopy = xbinutil("objcopy")
 xstrip = xbinutil("strip")
+
+xrustflags = "-C link-arg=-Wl,--compress-debug-sections=zlib"
+if sys.platform != "darwin":
+    # The cross-compiling toolchain that bin/xcompile installs on macOS does not
+    # support lld.
+    #
+    # TODO(benesch): use a newer cross toolchain.
+    xrustflags += " -C link-arg=-fuse-ld=lld"
 
 
 def docker_images() -> Set[str]:
@@ -243,10 +236,7 @@ class CargoBuild(CargoPreImage):
         self.bin = config.pop("bin", None)
         self.strip = config.pop("strip", True)
         self.extract = config.pop("extract", {})
-        self.rustflags = config.pop(
-            "rustflags",
-            "-C link-arg=-Wl,--compress-debug-sections=zlib -C link-arg=-fuse-ld=lld",
-        )
+        self.rustflags = config.pop("rustflags", xrustflags)
         if rd.coverage:
             self.rustflags += " -Zinstrument-coverage -C link-dead-code "
             # Nix generates some unresolved symbols that -Zinstrument-coverage
@@ -295,7 +285,9 @@ class CargoBuild(CargoPreImage):
             )
         if self.extract:
             output = spawn.capture(
-                cargo_build + ["--message-format=json"], unicode=True
+                cargo_build + ["--message-format=json"],
+                unicode=True,
+                env=dict(os.environ, XCOMPILE_RUSTFLAGS=self.rustflags),
             )
             for line in output.split("\n"):
                 if line.strip() == "" or not line.startswith("{"):
@@ -677,7 +669,7 @@ class DependencySet:
                     d.build()
                 else:
                     announce(f"Acquiring {spec}")
-                    acquired_from = d.acquire()
+                    d.acquire()
             else:
                 announce(f"Already built {spec}")
 
@@ -723,7 +715,7 @@ class Repository:
 
     Attributes:
         images: A mapping from image name to `Image` for all contained images.
-        compose_dirs: The set of directories containing an `mzcompose.yml` file.
+        compose_dirs: The set of directories containing an `mzcompose.yml` or `mzworkflows.py` file.
     """
 
     def __init__(self, root: Path, release_mode: bool = True, coverage: bool = False):
@@ -741,11 +733,11 @@ class Repository:
                 if image.name in self.images:
                     raise ValueError(f"image {image.name} exists twice")
                 self.images[image.name] = image
-            if "mzcompose.yml" in files:
+            if "mzcompose.yml" in files or "mzworkflows.py" in files:
                 name = Path(path).name
                 if name in self.compositions:
                     raise ValueError(f"composition {name} exists twice")
-                self.compositions[name] = Path(path) / "mzcompose.yml"
+                self.compositions[name] = Path(path)
 
         # Validate dependencies.
         for image in self.images.values():

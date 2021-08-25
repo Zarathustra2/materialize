@@ -29,6 +29,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use build_info::BuildInfo;
 use coord::LoggingConfig;
 use ore::metrics::MetricsRegistry;
+use pid_file::PidFile;
 
 use crate::mux::Mux;
 use crate::server_metrics::Metrics;
@@ -120,6 +121,8 @@ pub struct Config {
     pub symbiosis_url: Option<String>,
     /// Whether to permit usage of experimental features.
     pub experimental_mode: bool,
+    /// Whether to enable catalog-only mode.
+    pub disable_user_indexes: bool,
     /// Whether to run in safe mode.
     pub safe_mode: bool,
     /// Telemetry configuration.
@@ -213,6 +216,9 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
         }
     };
 
+    // Attempt to acquire PID file lock.
+    let pid_file = PidFile::open(config.data_directory.join("materialized.pid"))?;
+
     // Initialize network listener.
     let listener = TcpListener::bind(&config.listen_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -227,6 +233,7 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
         timestamp_frequency: config.timestamp_frequency,
         logical_compaction_window: config.logical_compaction_window,
         experimental_mode: config.experimental_mode,
+        disable_user_indexes: config.disable_user_indexes,
         safe_mode: config.safe_mode,
         build_info: &BUILD_INFO,
         metrics_registry: config.metrics_registry.clone(),
@@ -295,6 +302,7 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
 
     Ok(Server {
         local_addr,
+        _pid_file: pid_file,
         _drain_trigger: drain_trigger,
         _coord_handle: coord_handle,
     })
@@ -303,6 +311,7 @@ pub async fn serve(config: Config) -> Result<Server, anyhow::Error> {
 /// A running `materialized` server.
 pub struct Server {
     local_addr: SocketAddr,
+    _pid_file: PidFile,
     // Drop order matters for these fields.
     _drain_trigger: oneshot::Sender<()>,
     _coord_handle: coord::Handle,

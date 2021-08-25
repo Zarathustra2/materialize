@@ -15,7 +15,7 @@ import os
 import shlex
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from subprocess import CalledProcessError
 from typing import Dict, List, NamedTuple, Optional
 
@@ -28,7 +28,7 @@ from mypy_boto3_ec2.type_defs import (
 )
 from prettytable import PrettyTable
 
-from materialize import errors, git, spawn, ssh, ui
+from materialize import git, spawn, ssh, ui
 
 SPEAKER = ui.speaker("scratch> ")
 ROOT = os.environ["MZ_ROOT"]
@@ -61,6 +61,7 @@ def print_instances(ists: List[Instance], format: str) -> None:
         "Name",
         "Instance ID",
         "Public IP Address",
+        "Private IP Address",
         "Launched By",
         "Delete After",
         "State",
@@ -70,6 +71,7 @@ def print_instances(ists: List[Instance], format: str) -> None:
             name(tags),
             i.instance_id,
             i.public_ip_address,
+            i.private_ip_address,
             launched_by(tags),
             delete_after(tags),
             i.state["Name"],
@@ -398,7 +400,7 @@ def get_old_instances() -> List[InstanceTypeDef]:
         return i["State"]["Name"] == "running"
 
     def is_old(i: InstanceTypeDef) -> bool:
-        tags_dict = {tag["Key"]: tag["Value"] for tag in i["Tags"]}
+        tags_dict = {tag["Key"]: tag["Value"] for tag in i.get("Tags", [])}
         delete_after = tags_dict.get("scratch-delete-after")
         if delete_after is None:
             return False

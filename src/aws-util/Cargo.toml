@@ -6,7 +6,7 @@ edition = "2018"
 publish = false
 
 [dependencies]
-anyhow = "1.0.42"
+anyhow = "1.0.43"
 log = "0.4.13"
 mz-http-proxy = { path = "../http-proxy", features = ["hyper"] }
 rusoto_core = "0.47.0"
@@ -15,5 +15,5 @@ rusoto_kinesis = "0.47.0"
 rusoto_s3 = "0.47.0"
 rusoto_sqs = "0.47.0"
 rusoto_sts = "0.47.0"
-serde = { version = "1.0.127", features = ["derive"] }
-tokio = "1.9.0"
+serde = { version = "1.0.128", features = ["derive"] }
+tokio = "1.10.0"

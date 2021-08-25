@@ -64,6 +64,15 @@ mzworkflows:
         service: testdrive-svc
         command: --aws-region=us-east-2 --ci-output ${TD_TEST:-*.td esoteric/*.td}
 
+  # Run tests that hit the live, public PubNub service.
+  ci-pubnub:
+    steps:
+      - step: workflow
+        workflow: start-deps
+      - step: run
+        service: testdrive-svc
+        command: --ci-output esoteric/pubnub/pubnub.td
+
   # Run a couple of tests that verify that our http* proxy configuration works
   ci-proxy:
     env:
@@ -129,7 +138,7 @@ services:
     - .:/workdir
     - mzdata:/share/mzdata
     - tmp:/share/tmp
-    propagate-uid-gid: true
+    propagate_uid_gid: true
     init: true
   materialized:
     mzbuild: materialized
@@ -139,6 +148,7 @@ services:
       --timestamp-frequency 100ms
       --disable-telemetry
       --retain-prometheus-metrics 1s
+      --metrics-scraping-interval 1s
     ports:
       - 6875
     environment:

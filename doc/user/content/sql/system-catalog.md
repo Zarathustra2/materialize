@@ -209,6 +209,7 @@ Field        | Type        | Meaning
 `name`       | [`text`]    | The name of the index.
 `on_id`      | [`text`]    | The ID of the relation on which the index is built.
 `volatility` | [`text`]    | Whether the the index is [volatile](/overview/volatility). Either `volatile`, `nonvolatile`, or `unknown`.
+`enabled`    | [`bool`]    | Whether or not the index represents an [arrangement](/overview/arrangements/). `false` only in the case of [Disabling user indexes](/cli/#disable-user-indexes).
 
 ### `mz_index_columns`
 
@@ -600,12 +601,13 @@ Field            | Type       | Meaning
 
 The `mz_tables` table contains a row for each table in the system.
 
-Field          | Type       | Meaning
----------------|------------|----------
-`id`           | [`text`]   | Materialize's unique ID for the table.
-`oid`          | [`oid`]    | A [PostgreSQL-compatible OID][oid] for the table.
-`schema_id`    | [`bigint`] | The ID of the schema to which the table belongs.
-`name`         | [`text`]   | The name of the table.
+Field            | Type       | Meaning
+-----------------|------------|----------
+`id`             | [`text`]   | Materialize's unique ID for the table.
+`oid`            | [`oid`]    | A [PostgreSQL-compatible OID][oid] for the table.
+`schema_id`      | [`bigint`] | The ID of the schema to which the table belongs.
+`name`           | [`text`]   | The name of the table.
+`persisted_name` | [`text`]   | The name of the table's persisted materialization, or `NULL` if the table is not being persisted.
 
 ### `mz_types`
 

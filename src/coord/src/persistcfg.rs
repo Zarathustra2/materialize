@@ -11,22 +11,21 @@
 
 use std::path::PathBuf;
 
-use persist::error::Error;
+use ore::metrics::MetricsRegistry;
+use persist::error::{Error, ErrorLog};
 use persist::indexed::encoding::Id;
 use persist::storage::LockInfo;
 use repr::Row;
 use serde::Serialize;
 
 use expr::GlobalId;
-use persist::file::{FileBlob, FileBuffer};
+use persist::file::FileBlob;
 use persist::indexed::runtime::{self, MultiWriteHandle, RuntimeClient, StreamWriteHandle};
 use uuid::Uuid;
 
 /// Configuration of the persistence runtime and features.
 #[derive(Clone, Debug)]
 pub struct PersistConfig {
-    /// A directory under which un-indexed WAL-like writes are quickly stored.
-    pub buffer_path: PathBuf,
     /// A directory under which larger batches of indexed data are stored. This
     /// will eventually be S3 for Cloud.
     pub blob_path: PathBuf,
@@ -39,7 +38,7 @@ pub struct PersistConfig {
     /// initially here for end-to-end testing.
     pub system_table_enabled: bool,
     /// Unstructured information stored in the "lock" files created by the
-    /// buffer and blob to ensure that they are exclusive writers to those
+    /// log and blob to ensure that they are exclusive writers to those
     /// locations. This should contain whatever information might be useful to
     /// investigating an unexpected lock file (e.g. hostname and materialize
     /// version of the creating process).
@@ -49,7 +48,6 @@ pub struct PersistConfig {
 impl PersistConfig {
     pub fn disabled() -> Self {
         PersistConfig {
-            buffer_path: Default::default(),
             blob_path: Default::default(),
             user_table_enabled: false,
             system_table_enabled: false,
@@ -60,13 +58,17 @@ impl PersistConfig {
     /// Initializes the persistence runtime and returns a clone-able handle for
     /// interacting with it. Returns None and does not start the runtime if all
     /// persistence features are disabled.
-    pub fn init(&self, catalog_id: Uuid) -> Result<PersisterWithConfig, Error> {
+    pub fn init(
+        &self,
+        catalog_id: Uuid,
+        reg: &MetricsRegistry,
+    ) -> Result<PersisterWithConfig, Error> {
         let persister = if self.user_table_enabled || self.system_table_enabled {
             let lock_reentrance_id = catalog_id.to_string();
             let lock_info = LockInfo::new(lock_reentrance_id, self.lock_info.clone())?;
-            let buffer = FileBuffer::new(&self.buffer_path, lock_info.clone())?;
+            let log = ErrorLog;
             let blob = FileBlob::new(&self.blob_path, lock_info)?;
-            let persister = runtime::start(buffer, blob)?;
+            let persister = runtime::start(log, blob, reg)?;
             Some(persister)
         } else {
             None
@@ -88,15 +90,14 @@ impl PersisterWithConfig {
     fn stream_name(&self, id: GlobalId, pretty: &str) -> Option<String> {
         match id {
             GlobalId::User(id) if self.config.user_table_enabled => {
-                // TODO: This needs to be written down somewhere in the catalog
-                // in case we need to change the naming at some point. See
-                // related TODO in Catalog::deserialize_item.
+                // NB: This gets written down in the catalog, so it should be
+                // safe to change the naming, if necessary. See
+                // Catalog::deserialize_item.
                 Some(format!("user-table-{:?}-{}", id, pretty))
             }
             GlobalId::System(id) if self.config.system_table_enabled => {
-                // TODO: This needs to be written down somewhere in the catalog
-                // in case we need to change the naming at some point. See
-                // related TODO in Catalog::deserialize_item.
+                // NB: Until the end of our persisted system tables experiment, give
+                // persist team a heads up if you change this, please!
                 Some(format!("system-table-{:?}-{}", id, pretty))
             }
             _ => None,
@@ -104,11 +105,18 @@ impl PersisterWithConfig {
     }
 
     pub fn details(&self, id: GlobalId, pretty: &str) -> Result<Option<PersistDetails>, Error> {
-        let persister = match self.persister.as_ref() {
+        self.details_from_name(self.stream_name(id, pretty))
+    }
+
+    pub fn details_from_name(
+        &self,
+        stream_name: Option<String>,
+    ) -> Result<Option<PersistDetails>, Error> {
+        let stream_name = match stream_name {
             Some(x) => x,
             None => return Ok(None),
         };
-        let stream_name = match self.stream_name(id, pretty) {
+        let persister = match self.persister.as_ref() {
             Some(x) => x,
             None => return Ok(None),
         };
