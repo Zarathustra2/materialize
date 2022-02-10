@@ -205,12 +205,12 @@ pub enum ValueOrReader<'a, V, R: AvroRead> {
     Reader { len: usize, r: &'a mut R },
 }
 
-enum SchemaOrDefault<'b, R: AvroRead> {
+pub enum SchemaOrDefault<'b, R: AvroRead> {
     Schema(&'b mut R, SchemaNode<'b>),
     Default(&'b Value),
 }
 pub struct AvroFieldAccess<'b, R: AvroRead> {
-    schema: SchemaOrDefault<'b, R>,
+    pub schema: SchemaOrDefault<'b, R>,
 }
 
 impl<'b, R: AvroRead> AvroFieldAccess<'b, R> {
@@ -231,11 +231,11 @@ pub trait AvroRecordAccess<R: AvroRead> {
     ) -> Result<Option<(&'b str, usize, AvroFieldAccess<'b, R>)>, AvroError>;
 }
 
-struct SimpleRecordAccess<'a, R: AvroRead> {
-    schema: SchemaNode<'a>,
-    r: &'a mut R,
-    fields: &'a [RecordField],
-    i: usize,
+pub struct SimpleRecordAccess<'a, R: AvroRead> {
+    pub schema: SchemaNode<'a>,
+    pub r: &'a mut R,
+    pub fields: &'a [RecordField],
+    pub i: usize,
 }
 
 impl<'a, R: AvroRead> SimpleRecordAccess<'a, R> {

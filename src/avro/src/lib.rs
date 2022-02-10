@@ -342,8 +342,8 @@ pub use crate::codec::Codec;
 pub use crate::decode::public_decoders::*;
 pub use crate::decode::{
     give_value, AvroArrayAccess, AvroDecodable, AvroDecode, AvroDeserializer, AvroFieldAccess,
-    AvroMapAccess, AvroRead, AvroRecordAccess, GeneralDeserializer, Skip, StatefulAvroDecodable,
-    ValueOrReader,
+    AvroMapAccess, AvroRead, AvroRecordAccess, GeneralDeserializer, SchemaOrDefault,
+    SimpleRecordAccess, Skip, StatefulAvroDecodable, ValueOrReader,
 };
 pub use crate::encode::encode as encode_unchecked;
 pub use crate::reader::{from_avro_datum, Block, BlockIter, Reader};
